@@ -1,4 +1,13 @@
+import sys
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2) # Per-Monitor DPI Aware V2
+    except Exception:
+        pass
+
 import os
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false"
 
 # pyrefly: ignore [missing-import]
 import multiprocess

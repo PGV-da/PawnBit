@@ -1,5 +1,15 @@
-import math
 import sys
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2) # Per-Monitor DPI Aware V2
+    except Exception:
+        pass
+
+import os
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false"
+
+import math
 import threading
 # pyrefly: ignore [missing-import]
 from PyQt6.QtCore import Qt, QPoint, QRect
@@ -12,10 +22,9 @@ class OverlayScreen(QWidget):
         super().__init__()
         self.stockfish_queue = stockfish_queue
 
-        # Set the window to be the size of the screen
-        self.screen = QGuiApplication.screens()[0]
-        self.setFixedWidth(self.screen.size().width())
-        self.setFixedHeight(self.screen.size().height())
+        # Set the window to cover the entire virtual desktop (multi-monitor and offset support)
+        self.virtual_geo = QGuiApplication.primaryScreen().virtualGeometry()
+        self.setGeometry(self.virtual_geo)
 
         # Set the window to be transparent
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -143,6 +152,12 @@ class OverlayScreen(QWidget):
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
+        
+        # Translate coordinate system if the window geometry is offset (e.g. multi-monitor)
+        offset_x = self.geometry().x()
+        offset_y = self.geometry().y()
+        if offset_x != 0 or offset_y != 0:
+            painter.translate(-offset_x, -offset_y)
         
         # Draw arrows
         painter.setPen(QPen(Qt.GlobalColor.red, 1, Qt.PenStyle.NoPen))

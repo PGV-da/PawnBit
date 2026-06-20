@@ -1,3 +1,11 @@
+import sys
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2) # Per-Monitor DPI Aware V2
+    except Exception:
+        pass
+
 import multiprocess
 from stockfish import Stockfish
 import pyautogui
@@ -39,15 +47,11 @@ class StockfishBot(multiprocess.Process):
     # Converts a move to screen coordinates
     # Example: "a1" -> (x, y)
     def move_to_screen_pos(self, move):
-        # Get the absolute top left corner of the website
-        canvas_x_offset, canvas_y_offset = self.grabber.get_top_left_corner()
-
-        # Get the absolute board position
-        board_x = canvas_x_offset + self.grabber.get_board().location["x"]
-        board_y = canvas_y_offset + self.grabber.get_board().location["y"]
-
-        # Get the square size
-        square_size = self.grabber.get_board().size['width'] / 8
+        # Get the board's absolute screen rect via a single JS getBoundingClientRect call
+        rect = self.grabber.get_board_screen_rect()
+        board_x = rect['x']
+        board_y = rect['y']
+        square_size = rect['width'] / 8
 
         # Depending on the player color, the board is flipped, so the coordinates need to be adjusted
         if self.is_white:
@@ -445,16 +449,10 @@ class StockfishBot(multiprocess.Process):
             # Add board position and dimensions for the eval bar positioning
             board_elem = self.grabber.get_board()
             if board_elem:
-                # Get the absolute top left corner of the website
-                canvas_x_offset, canvas_y_offset = self.grabber.get_top_left_corner()
-                
-                # Calculate absolute board position and dimensions
-                overlay_data["board_position"] = {
-                    'x': canvas_x_offset + board_elem.location['x'],
-                    'y': canvas_y_offset + board_elem.location['y'],
-                    'width': board_elem.size['width'],
-                    'height': board_elem.size['height']
-                }
+                # Get the board's absolute screen rect via a single JS call (most accurate)
+                board_rect = self.grabber.get_board_screen_rect()
+                if board_rect:
+                    overlay_data["board_position"] = board_rect
                 
             # Always include the bot's color
             overlay_data["is_white"] = self.is_white
