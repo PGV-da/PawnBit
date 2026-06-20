@@ -1,0 +1,5 @@
+.idea
+.vscode
+stockfish
+__pycache__
+venv
