@@ -1,6 +1,7 @@
 import math
 import sys
 import threading
+# pyrefly: ignore [missing-import]
 from PyQt6.QtCore import Qt, QPoint, QRect
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen, QGuiApplication, QPolygon, QFont
 from PyQt6.QtWidgets import QApplication, QWidget
@@ -57,24 +58,35 @@ class OverlayScreen(QWidget):
 
         while True:
             message = self.stockfish_queue.get()
-            if isinstance(message, list):
-                # Arrow data
-                self.set_arrows(message)
-            elif isinstance(message, dict) and "eval" in message:
-                # Evaluation data
-                eval_value = message["eval"]
-                eval_type = message.get("eval_type", "cp")
+            
+            # Check if the PyQt widget has been deleted on the C++ side
+            from PyQt6 import sip
+            if sip.isdeleted(self):
+                break
                 
-                # Update board position if provided
-                if "board_position" in message:
-                    self.board_position = message["board_position"]
-                    self.update_eval_bar_position()
-                
-                # Update bot color if provided
-                if "is_white" in message:
-                    self.is_white = message["is_white"]
-                
-                self.update_eval_bar(eval_value, eval_type)
+            try:
+                if isinstance(message, list):
+                    # Arrow data
+                    self.set_arrows(message)
+                elif isinstance(message, dict) and "eval" in message:
+                    # Evaluation data
+                    eval_value = message["eval"]
+                    eval_type = message.get("eval_type", "cp")
+                    
+                    # Update board position if provided
+                    if "board_position" in message:
+                        self.board_position = message["board_position"]
+                        self.update_eval_bar_position()
+                    
+                    # Update bot color if provided
+                    if "is_white" in message:
+                        self.is_white = message["is_white"]
+                    
+                    self.update_eval_bar(eval_value, eval_type)
+            except RuntimeError as e:
+                if "deleted" in str(e):
+                    break
+                raise e
     
     def update_eval_bar_position(self):
         """
@@ -84,11 +96,11 @@ class OverlayScreen(QWidget):
             return
             
         # Position the eval bar to the left of the board with a small margin
-        self.eval_bar_x = self.board_position['x'] - self.eval_bar_width - self.eval_bar_margin
+        self.eval_bar_x = int(self.board_position['x'] - self.eval_bar_width - self.eval_bar_margin)
         
         # Make the eval bar the exact same height as the board
-        self.eval_bar_height = self.board_position['height']
-        self.eval_bar_y = self.board_position['y']
+        self.eval_bar_height = int(self.board_position['height'])
+        self.eval_bar_y = int(self.board_position['y'])
             
     def update_eval_bar(self, eval_value, eval_type="cp"):
         """
@@ -122,8 +134,8 @@ class OverlayScreen(QWidget):
         self.arrows = []
         for arrow in arrows:
             poly = self.get_arrow_polygon(
-                QPoint(arrow[0][0], arrow[0][1]),
-                QPoint(arrow[1][0], arrow[1][1])
+                QPoint(int(arrow[0][0]), int(arrow[0][1])),
+                QPoint(int(arrow[1][0]), int(arrow[1][1]))
             )
             self.arrows.append(poly)
         self.update()

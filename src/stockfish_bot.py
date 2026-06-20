@@ -278,6 +278,7 @@ class StockfishBot(multiprocess.Process):
                 # by finding the differences between
                 # the previous and current position
                 previous_move_list = move_list.copy()
+                game_restarted = False
                 while True:
                     if self.grabber.is_game_over():
                         # Send restart message to GUI
@@ -310,12 +311,16 @@ class StockfishBot(multiprocess.Process):
                         # Send initial evaluation, WDL, and material data to GUI
                         self.send_eval_data(stockfish, board)
                         self.pipe.send("START")
+                        game_restarted = True
                         break
                         
                     # Normal case - opponent made a move
                     if len(new_move_list) > len(previous_move_list):
                         move_list = new_move_list
                         break
+
+                if game_restarted:
+                    continue
 
                 # Get the move that the opponent made
                 move = move_list[-1]
@@ -374,6 +379,8 @@ class StockfishBot(multiprocess.Process):
             # Get WDL stats if available
             try:
                 wdl_stats = stockfish.get_wdl_stats()
+                if wdl_stats is None:
+                    wdl_stats = [0, 0, 0]
             except:
                 wdl_stats = [0, 0, 0]
                 

@@ -5,17 +5,26 @@ import multiprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.edge.service import Service as EdgeService
-from webdriver_manager.microsoft import EdgeChromiumDriverManager
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+    from webdriver_manager.microsoft import EdgeChromiumDriverManager
+except ImportError:
+    ChromeDriverManager = None
+    EdgeChromiumDriverManager = None
 from overlay import run
 from stockfish_bot import StockfishBot
 from selenium.common.exceptions import WebDriverException
 import keyboard
+try:
+    import requests
+except ImportError:
+    requests = None
 try:
     import winreg
 except ImportError:
@@ -29,11 +38,8 @@ class GUI:
         # Used for closing the threads
         self.exit = False
 
-        # The Selenium Chrome driver
+        # The Selenium Chrome driver (attached to user's existing browser)
         self.chrome = None
-
-        # # Used for storing the Stockfish Bot class Instance
-        # self.stockfish_bot = None
         self.chrome_url = None
         self.chrome_session_id = None
 
@@ -151,22 +157,11 @@ class GUI:
             )
             rb.pack(anchor=tk.NW)
 
-        # Create the open browser button
-        self.opening_browser = False
-        self.opened_browser = False
-        self.open_browser_button = tk.Button(
-            left_frame,
-            text="Open Browser",
-            command=self.on_open_browser_button_listener,
-        )
-        self.open_browser_button.pack(anchor=tk.NW, pady=(5, 0))
-
         # Create the start button
         self.running = False
         self.start_button = tk.Button(
             left_frame, text="Start", command=self.on_start_button_listener
         )
-        self.start_button["state"] = "disabled"
         self.start_button.pack(anchor=tk.NW, pady=5)
 
         # Create the manual mode checkbox
@@ -329,6 +324,10 @@ class GUI:
         self.stockfish_path_text = tk.Label(left_frame, text="", wraplength=180)
         self.stockfish_path_text.pack(anchor=tk.NW)
 
+        # Load config to restore stockfish path
+        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        self.load_config()
+
         left_frame.grid(row=0, column=0, padx=5, sticky=tk.NW)
 
         # Right frame
@@ -377,10 +376,6 @@ class GUI:
         # Start the process checker thread
         process_checker_thread = threading.Thread(target=self.process_checker_thread)
         process_checker_thread.start()
-
-        # Start the browser checker thread
-        browser_checker_thread = threading.Thread(target=self.browser_checker_thread)
-        browser_checker_thread.start()
 
         # Start the process communicator thread
         process_communicator_thread = threading.Thread(
@@ -482,30 +477,125 @@ class GUI:
                     self.on_start_button_listener()
             time.sleep(0.1)
 
-    # Detects if Selenium Chromedriver is running
-    def browser_checker_thread(self):
-        while not self.exit:
-            try:
-                if self.opened_browser and self.chrome is not None:
-                    try:
-                        # Try to get logs as done originally (only works if target is Chrome/Brave and supports logging)
-                        logs = self.chrome.get_log("driver")
-                        if logs and "target window already closed" in logs[-1]["message"]:
-                            raise Exception("Closed")
-                    except Exception:
-                        # Fallback for Edge or when logs aren't accessible: verify by requesting title
-                        _ = self.chrome.title
-            except Exception:
-                self.opened_browser = False
+    def _probe_cdp_tabs(self, port=9222):
+        """Probe a Chrome DevTools Protocol port and return list of open tabs."""
+        if requests is None:
+            return []
+        try:
+            resp = requests.get(f"http://localhost:{port}/json", timeout=1)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return []
 
-                # Set Opening Browser button state to closed
-                self.open_browser_button["text"] = "Open Browser"
-                self.open_browser_button["state"] = "normal"
-                self.open_browser_button.update()
+    def _find_browser_debug_port(self):
+        """Try common CDP debug ports and return (port, tabs) if found."""
+        for port in range(9222, 9232):
+            tabs = self._probe_cdp_tabs(port)
+            if tabs:
+                return port, tabs
+        return None, []
 
-                self.on_stop_button_listener()
-                self.chrome = None
-            time.sleep(0.2)
+    def check_browser_and_attach(self):
+        """
+        Checks if the user has the selected site open in the selected browser
+        via the Chrome DevTools Protocol (remote debugging).
+        Returns True if successfully attached, False otherwise.
+        """
+        site = self.website.get()
+        browser_choice = self.selected_browser.get()
+        target_url = "chess.com" if site == "chesscom" else "lichess.org"
+        site_name = "Chess.com" if site == "chesscom" else "Lichess.org"
+
+        port, tabs = self._find_browser_debug_port()
+
+        if not tabs:
+            messagebox.showinfo(
+                "Browser Not Detected",
+                f"Could not detect {browser_choice} with remote debugging enabled.\n\n"
+                f"Please open {browser_choice} with the following flag:\n"
+                f"  --remote-debugging-port=9222\n\n"
+                f"Then navigate to {site_name} and click Start again."
+            )
+            return False
+
+        # Check if the target site is open in any tab
+        matching_tab = None
+        for tab in tabs:
+            url = tab.get("url", "")
+            if target_url in url:
+                matching_tab = tab
+                break
+
+        if matching_tab is None:
+            messagebox.showinfo(
+                "Site Not Open",
+                f"{site_name} is not open in {browser_choice}.\n\n"
+                f"Please navigate to {site_name} in {browser_choice} and click Start again."
+            )
+            return False
+
+        # Attach Selenium to the existing browser via debugger address
+        try:
+            browser_path = self.available_browsers.get(browser_choice)
+
+            if browser_choice == "Edge":
+                options = EdgeOptions()
+                options.add_experimental_option("debuggerAddress", f"localhost:{port}")
+                if browser_path and browser_path != "default":
+                    options.binary_location = browser_path
+                # Use managed EdgeDriver to match installed Edge version
+                try:
+                    if EdgeChromiumDriverManager is not None:
+                        import os
+                        edge_install = EdgeChromiumDriverManager().install()
+                        folder = os.path.dirname(edge_install)
+                        edgedriver_path = os.path.join(folder, "msedgedriver.exe")
+                        service = EdgeService(edgedriver_path)
+                        driver = webdriver.Edge(service=service, options=options)
+                    else:
+                        driver = webdriver.Edge(options=options)
+                except Exception:
+                    driver = webdriver.Edge(options=options)
+            else:
+                options = ChromeOptions()
+                options.add_experimental_option("debuggerAddress", f"localhost:{port}")
+                if browser_path and browser_path != "default":
+                    options.binary_location = browser_path
+                # Use managed ChromeDriver to match installed Chrome/Brave version
+                try:
+                    if ChromeDriverManager is not None:
+                        import os
+                        chrome_install = ChromeDriverManager().install()
+                        folder = os.path.dirname(chrome_install)
+                        chromedriver_path = os.path.join(folder, "chromedriver.exe")
+                        service = ChromeService(chromedriver_path)
+                        driver = webdriver.Chrome(service=service, options=options)
+                    else:
+                        driver = webdriver.Chrome(options=options)
+                except Exception:
+                    driver = webdriver.Chrome(options=options)
+
+            self.chrome = driver
+            self.chrome_url = driver.command_executor._url
+            self.chrome_session_id = driver.session_id
+
+            # Switch to the tab that has the chess site open
+            for handle in driver.window_handles:
+                driver.switch_to.window(handle)
+                current_url = driver.current_url
+                if target_url in current_url:
+                    break
+
+            return True
+
+        except Exception as e:
+            messagebox.showerror(
+                "Attach Failed",
+                f"Could not attach to {browser_choice}.\n\nError: {e}"
+            )
+            return False
 
     # Responsible for communicating with the Stockfish Bot process
     # The pipe can receive the following commands:
@@ -604,127 +694,16 @@ class GUI:
     def keypress_listener_thread(self):
         while not self.exit:
             time.sleep(0.1)
-            if not self.opened_browser:
-                continue
-
             if keyboard.is_pressed("1"):
                 self.on_start_button_listener()
             elif keyboard.is_pressed("2"):
                 self.on_stop_button_listener()
 
-    def on_open_browser_button_listener(self):
-        # Set Opening Browser button state to opening
-        self.opening_browser = True
-        self.open_browser_button["text"] = "Opening Browser..."
-        self.open_browser_button["state"] = "disabled"
-        self.open_browser_button.update()
-
-        browser_choice = self.selected_browser.get()
-        browser_path = self.available_browsers.get(browser_choice)
-
-        try:
-            if browser_choice == "Edge":
-                options = webdriver.EdgeOptions()
-                if browser_path and browser_path != "default":
-                    options.binary_location = browser_path
-                options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
-                options.add_argument('--disable-blink-features=AutomationControlled')
-                options.add_experimental_option('useAutomationExtension', False)
-                try:
-                    self.chrome = webdriver.Edge(options=options)
-                except Exception as selenium_manager_err:
-                    try:
-                        edge_install = EdgeChromiumDriverManager().install()
-                        folder = os.path.dirname(edge_install)
-                        edgedriver_path = os.path.join(folder, "msedgedriver.exe")
-                        service = EdgeService(edgedriver_path)
-                        self.chrome = webdriver.Edge(service=service, options=options)
-                    except Exception as wdm_err:
-                        raise WebDriverException(f"Failed to start Edge automatically: {selenium_manager_err}. Fallback also failed: {wdm_err}")
-            elif browser_choice == "Brave":
-                options = webdriver.ChromeOptions()
-                if browser_path and browser_path != "default":
-                    options.binary_location = browser_path
-                options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
-                options.add_argument('--disable-blink-features=AutomationControlled')
-                options.add_experimental_option('useAutomationExtension', False)
-                try:
-                    self.chrome = webdriver.Chrome(options=options)
-                except Exception as selenium_manager_err:
-                    try:
-                        chrome_install = ChromeDriverManager().install()
-                        folder = os.path.dirname(chrome_install)
-                        chromedriver_path = os.path.join(folder, "chromedriver.exe")
-                        service = ChromeService(chromedriver_path)
-                        self.chrome = webdriver.Chrome(service=service, options=options)
-                    except Exception as wdm_err:
-                        raise WebDriverException(f"Failed to start Brave automatically: {selenium_manager_err}. Fallback also failed: {wdm_err}")
-            else:  # Chrome
-                options = webdriver.ChromeOptions()
-                if browser_path and browser_path != "default":
-                    options.binary_location = browser_path
-                options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
-                options.add_argument('--disable-blink-features=AutomationControlled')
-                options.add_experimental_option('useAutomationExtension', False)
-                try:
-                    self.chrome = webdriver.Chrome(options=options)
-                except Exception as selenium_manager_err:
-                    try:
-                        chrome_install = ChromeDriverManager().install()
-                        folder = os.path.dirname(chrome_install)
-                        chromedriver_path = os.path.join(folder, "chromedriver.exe")
-                        service = ChromeService(chromedriver_path)
-                        self.chrome = webdriver.Chrome(service=service, options=options)
-                    except Exception as wdm_err:
-                        raise WebDriverException(f"Failed to start Chrome automatically: {selenium_manager_err}. Fallback also failed: {wdm_err}")
-        except WebDriverException as e:
-            self.opening_browser = False
-            self.open_browser_button["text"] = "Open Browser"
-            self.open_browser_button["state"] = "normal"
-            self.open_browser_button.update()
-            tk.messagebox.showerror(
-                "Error",
-                f"Can't find or open {browser_choice}. Make sure you have it installed.",
-            )
-            return
-        except Exception as e:
-            # Other error
-            self.opening_browser = False
-            self.open_browser_button["text"] = "Open Browser"
-            self.open_browser_button["state"] = "normal"
-            self.open_browser_button.update()
-            tk.messagebox.showerror(
-                "Error",
-                f"An error occurred while opening the browser: {e}",
-            )
-            return
-
-        # Open chess.com
-        if self.website.get() == "chesscom":
-            self.chrome.get("https://www.chess.com")
-        else:
-            self.chrome.get("https://www.lichess.org")
-
-        # Build Stockfish Bot
-        self.chrome_url = self.chrome.command_executor._url
-        self.chrome_session_id = self.chrome.session_id
-
-        # Set Opening Browser button state to opened
-        self.opening_browser = False
-        self.opened_browser = True
-        self.open_browser_button["text"] = "Browser is open"
-        self.open_browser_button["state"] = "disabled"
-        self.open_browser_button.update()
-
-        # Enable run button
-        self.start_button["state"] = "normal"
-        self.start_button.update()
-
     def on_start_button_listener(self):
         # Check if Slow mover value is valid
         slow_mover = self.slow_mover.get()
         if slow_mover < 10 or slow_mover > 1000:
-            tk.messagebox.showerror(
+            messagebox.showerror(
                 "Error",
                 "Slow Mover must be between 10 and 1000"
             )
@@ -732,15 +711,19 @@ class GUI:
 
         # Check if stockfish path is not empty
         if self.stockfish_path == "":
-            tk.messagebox.showerror(
+            messagebox.showerror(
                 "Error",
                 "Stockfish path is empty"
             )
             return
 
+        # Check if the browser has the selected site open
+        if not self.check_browser_and_attach():
+            return
+
         # Check if mouseless mode is enabled when on chess.com
         if self.enable_mouseless_mode.get() == 1 and self.website.get() == "chesscom":
-            tk.messagebox.showerror(
+            messagebox.showerror(
                 "Error", "Mouseless mode is only supported on lichess.org"
             )
             return
@@ -868,13 +851,43 @@ class GUI:
     def on_select_stockfish_button_listener(self):
         # Create the file dialog
         f = filedialog.askopenfilename()
-        if f is None:
+        if f is None or f == "":
             return
 
         # Set the Stockfish path
         self.stockfish_path = f
         self.stockfish_path_text["text"] = self.stockfish_path
         self.stockfish_path_text.update()
+        self.save_config()
+
+    def load_config(self):
+        import json
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r") as f:
+                    config = json.load(f)
+                    path = config.get("stockfish_path", "")
+                    if path and os.path.exists(path):
+                        self.stockfish_path = path
+                        self.stockfish_path_text["text"] = self.stockfish_path
+            except Exception as e:
+                print(f"Error loading config: {e}")
+
+    def save_config(self):
+        import json
+        try:
+            config = {}
+            if os.path.exists(self.config_path):
+                with open(self.config_path, "r") as f:
+                    try:
+                        config = json.load(f)
+                    except:
+                        pass
+            config["stockfish_path"] = self.stockfish_path
+            with open(self.config_path, "w") as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            print(f"Error saving config: {e}")
 
     # Clears the Treeview
     def clear_tree(self):
